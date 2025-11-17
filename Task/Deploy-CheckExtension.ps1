@@ -114,6 +114,22 @@ A list of URLs that will completely bypass blocking. Entering **ANY** will decre
 '@)][string[]]$urlAllowlist,
 
     [Parameter(HelpMessage=@'
+Enable Generic Webhook. Maps to "Generic Webhook Enabled" in webhook settings.
+| State | Effect                                              |
+|-------|-----------------------------------------------------|
+| `0`   | Disabled (default)                                  |
+| `1`   | Enabled (requires GenericWebhookUrl and Events)     |
+'@)][ValidateSet(0,1)][int]$EnableGenericWebhook = 0,
+    [Parameter(HelpMessage=@'
+Generic Webhook URL. Required if EnableGenericWebhook=1. Blank by default.
+'@)][string]$GenericWebhookUrl = '',
+    [Parameter(HelpMessage=@'
+Generic Webhook Event Types. Array of event types to send to the webhook.
+Valid values: detection_alert, false_positive_report, page_blocked, rogue_app_detected, threat_detected, validation_event
+'@)][ValidateSet('detection_alert','false_positive_report','page_blocked','rogue_app_detected','threat_detected','validation_event')]
+    [string[]]$GenericWebhookEvents = @(),
+
+    [Parameter(HelpMessage=@'
 Branding: Company Name shown in extension UI.
 '@)][string]$CompanyName  = 'CyberDrain',
     [Parameter(HelpMessage=@'
@@ -171,6 +187,9 @@ function Get-DesiredItem {
         [int]$UpdateInterval,
         [int]$EnableDebugLogging,
         [string[]]$urlAllowlist,
+        [int]$EnableGenericWebhook,
+        [string]$GenericWebhookUrl,
+        [string[]]$GenericWebhookEvents,
         [string]$CompanyName,
         [string]$CompanyUrl,
         [string]$ProductName,
@@ -187,6 +206,7 @@ function Get-DesiredItem {
     foreach($b in $bases){
         # Build canonical Present arrays once
         $brandingKey = Join-Path $b.ManagedKey 'customBranding'
+        $webhookKey = Join-Path $b.ManagedKey 'genericWebhook'
         $policyItems = @(
             @{ Path=$b.ManagedKey; Name='showNotifications';    Type='DWord'; Value=$ShowNotifications },
             @{ Path=$b.ManagedKey; Name='enableValidPageBadge'; Type='DWord'; Value=$EnableValidPageBadge },
@@ -198,6 +218,11 @@ function Get-DesiredItem {
             @{ Path=$b.ManagedKey; Name='updateInterval';       Type='DWord'; Value=$UpdateInterval },
             @{ Path=$b.ManagedKey; Name='enableDebugLogging';   Type='DWord'; Value=$EnableDebugLogging }
             @{ Path=$b.ManagedKey; Name='urlAllowlist';         Type='MultiString'; Value=$urlAllowlist }
+        )
+        $webhookItems = @(
+            @{ Path=$webhookKey; Name='enabled'; Type='DWord'; Value=$EnableGenericWebhook },
+            @{ Path=$webhookKey; Name='url';     Type='String'; Value=$GenericWebhookUrl },
+            @{ Path=$webhookKey; Name='events';  Type='MultiString'; Value=$GenericWebhookEvents }
         )
         $brandingItems = @(
             @{ Path=$brandingKey; Name='companyName';  Type='String'; Value=$CompanyName },
@@ -213,16 +238,17 @@ function Get-DesiredItem {
         )
 
         if($Ensure -eq 'Present'){
-            $policyItems + $brandingItems + $settingsItems | ForEach-Object { $_ }
+            $policyItems + $webhookItems + $brandingItems + $settingsItems | ForEach-Object { $_ }
         } else {
             # Transform for Absent: null policy & branding values, block extension, drop update_url
             $absentPolicy   = $policyItems   | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
+            $absentWebhook  = $webhookItems  | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
             $absentBranding = $brandingItems | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
             $absentSettings = @(
                 @{ Path=$b.SettingsKey; Name='installation_mode'; Type='String'; Value='blocked' },
                 @{ Path=$b.SettingsKey; Name='update_url';        Type='Remove'; Value=$null }
             )
-            $absentPolicy + $absentBranding + $absentSettings | ForEach-Object { $_ }
+            $absentPolicy + $absentWebhook + $absentBranding + $absentSettings | ForEach-Object { $_ }
         }
     }
 }
@@ -231,6 +257,15 @@ function Get-DesiredItem {
 if($EnableCippReporting -eq 1){
     if([string]::IsNullOrWhiteSpace($CippServerUrl) -or [string]::IsNullOrWhiteSpace($azureTenantId)){ # $azureTenantId Value supplied by Immy environment
         throw 'CippServerUrl and CippTenantId must be provided when EnableCippReporting=1.'
+    }
+}
+
+if($EnableGenericWebhook -eq 1){
+    if([string]::IsNullOrWhiteSpace($GenericWebhookUrl)){
+        throw 'GenericWebhookUrl must be provided when EnableGenericWebhook=1.'
+    }
+    if($GenericWebhookEvents.Count -eq 0){
+        throw 'At least one event type must be specified in GenericWebhookEvents when EnableGenericWebhook=1.'
     }
 }
 
@@ -251,6 +286,9 @@ $desiredItems = Get-DesiredItem `
     -UpdateInterval $UpdateInterval `
     -EnableDebugLogging $EnableDebugLogging `
     -urlAllowlist $urlAllowlist `
+    -EnableGenericWebhook $EnableGenericWebhook `
+    -GenericWebhookUrl $GenericWebhookUrl `
+    -GenericWebhookEvents $GenericWebhookEvents `
     -CompanyName $CompanyName `
     -CompanyUrl $CompanyUrl `
     -ProductName $ProductName `
