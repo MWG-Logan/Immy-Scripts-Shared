@@ -158,6 +158,44 @@ Write-Host "Starting enforcement for Extensions: Chrome=$ChromeExtensionId Edge=
 # [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter','')] param([string]$FutureParam)
 # Prefer explicit functional parameters over relying on script scope to satisfy analyzers & improve clarity.
 
+function ConvertTo-StringArray {
+    <#
+    .SYNOPSIS
+    Safely converts input to a properly typed string array for registry MultiString values.
+    .DESCRIPTION
+    Ensures the returned value is always System.String[] type, never Object[].
+    Handles null, empty arrays, and arrays with values correctly.
+    Uses [string[]] casting with explicit array conversion to ensure type survives $using: scope transfer.
+    #>
+    param([Parameter(ValueFromPipeline)]$InputArray)
+    
+    # If null, return empty string array with explicit type
+    if ($null -eq $InputArray) {
+        $emptyArray = [string[]]::new(0)
+        return ,$emptyArray
+    }
+    
+    # Ensure it's treated as an array
+    $arr = @($InputArray)
+    if ($arr.Count -eq 0) {
+        $emptyArray = [string[]]::new(0)
+        return ,$emptyArray
+    }
+    
+    # Use strongly typed array creation
+    $stringArray = [string[]]::new($arr.Count)
+    for ($i = 0; $i -lt $arr.Count; $i++) {
+        if ($null -ne $arr[$i]) {
+            $stringArray[$i] = [string]$arr[$i]
+        } else {
+            $stringArray[$i] = [string]::Empty
+        }
+    }
+    
+    # Return with unary comma to prevent unwrapping
+    return ,$stringArray
+}
+
 function Get-ManagedStorageBasePath {
     param(
         [string]$ChromeExtensionId,
@@ -217,12 +255,12 @@ function Get-DesiredItem {
             @{ Path=$b.ManagedKey; Name='customRulesUrl';       Type='String'; Value=$CustomRulesUrl },
             @{ Path=$b.ManagedKey; Name='updateInterval';       Type='DWord'; Value=$UpdateInterval },
             @{ Path=$b.ManagedKey; Name='enableDebugLogging';   Type='DWord'; Value=$EnableDebugLogging }
-            @{ Path=$b.ManagedKey; Name='urlAllowlist';         Type='MultiString'; Value=([string[]]@($urlAllowlist)) }
+            @{ Path=$b.ManagedKey; Name='urlAllowlist';         Type='MultiString'; Value=(ConvertTo-StringArray $urlAllowlist) }
         )
         $webhookItems = @(
             @{ Path=$webhookKey; Name='enabled'; Type='DWord'; Value=$EnableGenericWebhook },
             @{ Path=$webhookKey; Name='url';     Type='String'; Value=$GenericWebhookUrl },
-            @{ Path=$webhookKey; Name='events';  Type='MultiString'; Value=([string[]]@($GenericWebhookEvents)) }
+            @{ Path=$webhookKey; Name='events';  Type='MultiString'; Value=(ConvertTo-StringArray $GenericWebhookEvents) }
         )
         $brandingItems = @(
             @{ Path=$brandingKey; Name='companyName';  Type='String'; Value=$CompanyName },
