@@ -217,12 +217,12 @@ function Get-DesiredItem {
             @{ Path=$b.ManagedKey; Name='customRulesUrl';       Type='String'; Value=$CustomRulesUrl },
             @{ Path=$b.ManagedKey; Name='updateInterval';       Type='DWord'; Value=$UpdateInterval },
             @{ Path=$b.ManagedKey; Name='enableDebugLogging';   Type='DWord'; Value=$EnableDebugLogging }
-            @{ Path=$b.ManagedKey; Name='urlAllowlist';         Type='MultiString'; Value=$urlAllowlist }
+            @{ Path=$b.ManagedKey; Name='urlAllowlist';         Type='MultiString'; Value=([string[]]$urlAllowlist) }
         )
         $webhookItems = @(
             @{ Path=$webhookKey; Name='enabled'; Type='DWord'; Value=$EnableGenericWebhook },
             @{ Path=$webhookKey; Name='url';     Type='String'; Value=$GenericWebhookUrl },
-            @{ Path=$webhookKey; Name='events';  Type='MultiString'; Value=$GenericWebhookEvents }
+            @{ Path=$webhookKey; Name='events';  Type='MultiString'; Value=([string[]]$GenericWebhookEvents) }
         )
         $brandingItems = @(
             @{ Path=$brandingKey; Name='companyName';  Type='String'; Value=$CompanyName },
