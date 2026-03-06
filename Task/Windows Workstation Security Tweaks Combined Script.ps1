@@ -1,6 +1,9 @@
 <#
 Author: Logan Cook
 Notes: Requires `WinFeatureShould-Be` Helper function
+Instructions: To discover new items to enforce, visit https://security.microsoft.com/exposure-recommendations -> Devices -> Misconfigurations.
+    After selecting a misconfiguration and selecting the 'remediation options' tab, check if there is a registry control. If there is, that is what you use here.
+    If there is no registry control, the hardening is likely intended to be done via device CSPs. Intune (usually Attack Surface Reduction) is a great secondary enforcement mechanism.
 #>
 
 param(
