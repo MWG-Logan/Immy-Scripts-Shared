@@ -384,6 +384,13 @@ function Get-DesiredItem {
             } elseif($b.Browser -eq 'Chrome'){
                 $settingsItems += @{ Path=$b.SettingsKey; Name='toolbar_pin'; Type='String'; Value='force_pinned' }
             }
+        } else {
+            # Explicitly remove toolbar pin values so a previously-pinned extension can be unpinned
+            if($b.Browser -eq 'Edge'){
+                $settingsItems += @{ Path=$b.SettingsKey; Name='toolbar_state'; Type='Remove'; Value=$null }
+            } elseif($b.Browser -eq 'Chrome'){
+                $settingsItems += @{ Path=$b.SettingsKey; Name='toolbar_pin'; Type='Remove'; Value=$null }
+            }
         }
 
         if($Ensure -eq 'Present'){
@@ -471,6 +478,46 @@ $desiredItems = Get-DesiredItem `
     -InstallationMode $InstallationMode `
     -ForceToolbarPin $ForceToolbarPin
 
+# Detect and clean stale numbered registry entries on the target machine.
+# The extension actively reads these subkeys; leftover entries from a previously
+# larger array would cause incorrect behavior. Invoke-ImmyCommand runs the
+# scriptblock on the target where native registry cmdlets work.
+if($Ensure -eq 'Absent'){
+    $urlAllowlistExpected = 0
+    $protectedDomainsExpected = 0
+    $webhookEventsExpected = 0
+} else {
+    $urlAllowlistExpected = if($urlAllowlist){ $urlAllowlist.Count } else { 0 }
+    $protectedDomainsExpected = if($DomainSquattingProtectedDomains){ $DomainSquattingProtectedDomains.Count } else { 0 }
+    $webhookEventsExpected = if($WebhookEvents){ $WebhookEvents.Count } else { 0 }
+}
+$staleEntriesClean = Invoke-ImmyCommand {
+    $subkeys = @(
+        @{ Path = "HKLM:\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\$($using:ChromeExtensionId)\policy\urlAllowlist"; Expected = $using:urlAllowlistExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\$($using:ChromeExtensionId)\policy\domainSquatting\protectedDomains"; Expected = $using:protectedDomainsExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\$($using:ChromeExtensionId)\policy\genericWebhook\events"; Expected = $using:webhookEventsExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$($using:EdgeExtensionId)\policy\urlAllowlist"; Expected = $using:urlAllowlistExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$($using:EdgeExtensionId)\policy\domainSquatting\protectedDomains"; Expected = $using:protectedDomainsExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$($using:EdgeExtensionId)\policy\genericWebhook\events"; Expected = $using:webhookEventsExpected }
+    )
+    $hasStale = $false
+    foreach($sk in $subkeys){
+        if(Test-Path $sk.Path){
+            $staleNames = @((Get-Item $sk.Path).Property | Where-Object { $_ -match '^\d+$' -and [int]$_ -gt $sk.Expected })
+            if($staleNames.Count -gt 0){
+                $hasStale = $true
+                if($using:Method -eq 'set'){
+                    foreach($name in $staleNames){
+                        Remove-ItemProperty -Path $sk.Path -Name $name -Force -ErrorAction SilentlyContinue
+                    }
+                    Write-Host "Removed $($staleNames.Count) stale entries from $($sk.Path)"
+                }
+            }
+        }
+    }
+    return -not $hasStale
+}
+
 if($Ensure -eq 'Present'){
     # Use ImmyBot helper pipeline for each required value; it internally interprets $method for test/set
     # Collect boolean results during test phase to determine overall compliance.
@@ -484,8 +531,8 @@ if($Ensure -eq 'Present'){
         }
     }
     if($Method -eq 'test'){
-        $compliant = ($results -notcontains $false)
-        if($compliant){ Write-Host 'All extension policy settings are compliant (helper).' } else { Write-Host 'One or more policy values are non-compliant.' }
+        $compliant = ($results -notcontains $false) -and $staleEntriesClean
+        if($compliant){ Write-Host 'All extension policy settings are compliant.' } else { Write-Host 'One or more policy values are non-compliant.' }
         return $compliant
     }
 } else { # Ensure = Absent
@@ -500,7 +547,7 @@ if($Ensure -eq 'Present'){
         }
     }
     if($Method -eq 'test'){
-        $compliant = ($results -notcontains $false)
+        $compliant = ($results -notcontains $false) -and $staleEntriesClean
         if($compliant){ Write-Host 'All extension policy values are absent as desired.' } else { Write-Host 'One or more extension policy values still present.' }
         return $compliant
     } elseif($Method -eq 'set'){
