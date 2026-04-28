@@ -27,7 +27,7 @@
     Returns [bool] during test phase. In set phase writes summary output (Absent) or relies on helper output (Present).
     Validates inputs (color hex, interval range). All registry writes are HKLM so run in System context.
 
-    Script courtesy of https://github.com/MWGMorningwood/
+    Script courtesy of https://github.com/MWG-Logan/
 
 #>
 [CmdletBinding(SupportsShouldProcess=$false)]
@@ -65,6 +65,14 @@ Installation mode policy value for ExtensionSettings:
 '@)][ValidateSet('force_installed','normal_installed','allowed','blocked')][string]$InstallationMode = 'force_installed',
 
     [Parameter(HelpMessage=@'
+Force pin extension to browser toolbar.
+| State | Effect                   |
+|-------|--------------------------|
+| `0`   | Not pinned               |
+| `1`   | Force pinned (default)   |
+'@)][ValidateSet(0,1)][int]$ForceToolbarPin = 1,
+
+    [Parameter(HelpMessage=@'
 Show Notifications toggle. Maps to "Show Notifications" in extension settings.
 | State | Effect               |
 |-------|----------------------|
@@ -78,6 +86,11 @@ Valid Page Badge toggle. Maps to "Show Valid Page Badge".
 | `0`   | Disabled (default) |
 | `1`   | Enabled            |
 '@)][ValidateSet(0,1)][int]$EnableValidPageBadge = 0,
+    [Parameter(HelpMessage=@'
+Valid Page Badge auto-dismiss timeout in seconds.
+Set to 0 for no timeout (badge stays visible until manually dismissed).
+Default 5. Range 0-300.
+'@)][ValidateRange(0,300)][int]$ValidPageBadgeTimeout = 5,
     [Parameter(HelpMessage=@'
 Page Blocking toggle. Maps to "Enable Page Blocking".
 | State | Effect               |
@@ -95,6 +108,10 @@ CIPP Reporting toggle. Maps to "Enable CIPP Reporting".
     [Parameter(HelpMessage=@'
 CIPP Server URL. Required if EnableCippReporting=1. Blank by default.
 '@)][string]$CippServerUrl = '',
+    [Parameter(HelpMessage=@'
+Override the CIPP Tenant ID. By default the ImmyBot-provided `$azureTenantId` is used.
+Set this only if the ImmyBot tenant ID does not match the tenant reported to CIPP.
+'@)][string]$CippTenantIdOverride,
     [Parameter(HelpMessage=@'
 Custom Rules / Config URL for detection configuration. Blank = unused.
 '@)][string]$CustomRulesUrl = '',
@@ -114,17 +131,96 @@ A list of URLs that will completely bypass blocking. Entering **ANY** will decre
 '@)][string[]]$urlAllowlist,
 
     [Parameter(HelpMessage=@'
+Enable domain squatting detection.
+| State | Effect             |
+|-------|--------------------|
+| `0`   | Disabled           |
+| `1`   | Enabled (default)  |
+'@)][ValidateSet(0,1)][int]$DomainSquattingEnabled = 1,
+    [Parameter(HelpMessage=@'
+Maximum character differences (Levenshtein distance) to trigger domain squatting detection. Lower values are stricter.
+Default 2. Range 1-5.
+'@)][ValidateRange(1,5)][int]$DomainSquattingDeviationThreshold = 2,
+    [Parameter(HelpMessage=@'
+Enable Levenshtein distance detection algorithm for domain squatting.
+| State | Effect             |
+|-------|--------------------|
+| `0`   | Disabled           |
+| `1`   | Enabled (default)  |
+'@)][ValidateSet(0,1)][int]$DomainSquattingLevenshtein = 1,
+    [Parameter(HelpMessage=@'
+Enable homoglyph (confusable character) detection algorithm for domain squatting.
+| State | Effect             |
+|-------|--------------------|
+| `0`   | Disabled           |
+| `1`   | Enabled (default)  |
+'@)][ValidateSet(0,1)][int]$DomainSquattingHomoglyph = 1,
+    [Parameter(HelpMessage=@'
+Enable typosquatting (typing mistake) detection algorithm for domain squatting.
+| State | Effect             |
+|-------|--------------------|
+| `0`   | Disabled           |
+| `1`   | Enabled (default)  |
+'@)][ValidateSet(0,1)][int]$DomainSquattingTyposquat = 1,
+    [Parameter(HelpMessage=@'
+Enable combosquatting (prefix/suffix) detection algorithm for domain squatting.
+| State | Effect             |
+|-------|--------------------|
+| `0`   | Disabled           |
+| `1`   | Enabled (default)  |
+'@)][ValidateSet(0,1)][int]$DomainSquattingCombosquat = 1,
+    [Parameter(HelpMessage=@'
+Additional domains to protect beyond those extracted from the URL allowlist.
+'@)][string[]]$DomainSquattingProtectedDomains,
+    [Parameter(HelpMessage=@'
+Action to take when domain squatting is detected.
+| State   | Effect               |
+|---------|----------------------|
+| `block` | Block page (default) |
+| `warn`  | Show warning         |
+| `log`   | Log only             |
+'@)][ValidateSet('block','warn','log')][string]$DomainSquattingAction = 'block',
+    [Parameter(HelpMessage=@'
+Log all domain squatting detections to activity log.
+| State | Effect             |
+|-------|--------------------|
+| `0`   | Disabled           |
+| `1`   | Enabled (default)  |
+'@)][ValidateSet(0,1)][int]$DomainSquattingLogDetections = 1,
+
+    [Parameter(HelpMessage=@'
+Enable generic webhook for sending detection events to a custom endpoint.
+| State | Effect             |
+|-------|--------------------|
+| `0`   | Disabled (default) |
+| `1`   | Enabled            |
+'@)][ValidateSet(0,1)][int]$EnableGenericWebhook = 0,
+    [Parameter(HelpMessage=@'
+Webhook URL endpoint. Required if EnableGenericWebhook=1. Blank by default.
+'@)][string]$WebhookUrl = '',
+    [Parameter(HelpMessage=@'
+Event types to send to the generic webhook.
+Available: detection_alert, false_positive_report, page_blocked, rogue_app_detected, threat_detected, validation_event.
+'@)][ValidateSet('detection_alert','false_positive_report','page_blocked','rogue_app_detected','threat_detected','validation_event')][string[]]$WebhookEvents,
+
+    [Parameter(HelpMessage=@'
 Branding: Company Name shown in extension UI.
 '@)][string]$CompanyName  = 'CyberDrain',
-    [Parameter(HelpMessage=@'
-Branding: Company URL shown in extension UI.
-'@)][string]$CompanyUrl   = 'https://cyberdrain.com/',
     [Parameter(HelpMessage=@'
 Branding: Product Name shown in extension UI.
 '@)][string]$ProductName  = 'Check - Phishing Protection',
     [Parameter(HelpMessage=@'
 Branding: Support email address. Blank allowed.
 '@)][string]$SupportEmail = '',
+    [Parameter(HelpMessage=@'
+Branding: Support URL opened by popup Support link. Blank allowed.
+'@)][string]$SupportUrl = '',
+    [Parameter(HelpMessage=@'
+Branding: Privacy Policy URL opened by popup Privacy link. Blank allowed.
+'@)][string]$PrivacyPolicyUrl = '',
+    [Parameter(HelpMessage=@'
+Branding: About URL opened by popup About link. Blank allowed.
+'@)][string]$AboutUrl = '',
     [Parameter(HelpMessage=@'
 Branding: Primary HEX color (#RRGGBB). Default #F77F00.
 Must be valid hex (e.g. #FFFFFF).
@@ -164,20 +260,37 @@ function Get-DesiredItem {
         [string]$EdgeUpdateUrl,
         [int]$ShowNotifications,
         [int]$EnableValidPageBadge,
+        [int]$ValidPageBadgeTimeout,
         [int]$EnablePageBlocking,
         [int]$EnableCippReporting,
         [string]$CippServerUrl,
+        [string]$CippTenantId,
         [string]$CustomRulesUrl,
         [int]$UpdateInterval,
         [int]$EnableDebugLogging,
         [string[]]$urlAllowlist,
+        [int]$DomainSquattingEnabled,
+        [int]$DomainSquattingDeviationThreshold,
+        [int]$DomainSquattingLevenshtein,
+        [int]$DomainSquattingHomoglyph,
+        [int]$DomainSquattingTyposquat,
+        [int]$DomainSquattingCombosquat,
+        [string[]]$DomainSquattingProtectedDomains,
+        [string]$DomainSquattingAction,
+        [int]$DomainSquattingLogDetections,
+        [int]$EnableGenericWebhook,
+        [string]$WebhookUrl,
+        [string[]]$WebhookEvents,
         [string]$CompanyName,
-        [string]$CompanyUrl,
         [string]$ProductName,
         [string]$SupportEmail,
+        [string]$SupportUrl,
+        [string]$PrivacyPolicyUrl,
+        [string]$AboutUrl,
         [string]$PrimaryColor,
         [string]$LogoUrl,
-        [string]$InstallationMode
+        [string]$InstallationMode,
+        [int]$ForceToolbarPin
     )
     $bases = Get-ManagedStorageBasePath `
         -ChromeExtensionId $ChromeExtensionId `
@@ -187,50 +300,140 @@ function Get-DesiredItem {
     foreach($b in $bases){
         # Build canonical Present arrays once
         $brandingKey = Join-Path $b.ManagedKey 'customBranding'
+        $urlAllowlistKey = Join-Path $b.ManagedKey 'urlAllowlist'
+        $domainSquattingKey = Join-Path $b.ManagedKey 'domainSquatting'
+        $domainSquattingAlgorithmsKey = Join-Path $domainSquattingKey 'algorithms'
+        $domainSquattingProtectedDomainsKey = Join-Path $domainSquattingKey 'protectedDomains'
+        $genericWebhookKey = Join-Path $b.ManagedKey 'genericWebhook'
+        $webhookEventsKey = Join-Path $genericWebhookKey 'events'
+
         $policyItems = @(
-            @{ Path=$b.ManagedKey; Name='showNotifications';    Type='DWord'; Value=$ShowNotifications },
-            @{ Path=$b.ManagedKey; Name='enableValidPageBadge'; Type='DWord'; Value=$EnableValidPageBadge },
-            @{ Path=$b.ManagedKey; Name='enablePageBlocking';   Type='DWord'; Value=$EnablePageBlocking },
-            @{ Path=$b.ManagedKey; Name='enableCippReporting';  Type='DWord'; Value=$EnableCippReporting },
-            @{ Path=$b.ManagedKey; Name='cippServerUrl';        Type='String'; Value=$CippServerUrl },
-            @{ Path=$b.ManagedKey; Name='cippTenantId';         Type='String'; Value=$azureTenantId }, # $azureTenantId Value supplied by Immy environment
-            @{ Path=$b.ManagedKey; Name='customRulesUrl';       Type='String'; Value=$CustomRulesUrl },
-            @{ Path=$b.ManagedKey; Name='updateInterval';       Type='DWord'; Value=$UpdateInterval },
-            @{ Path=$b.ManagedKey; Name='enableDebugLogging';   Type='DWord'; Value=$EnableDebugLogging }
-            @{ Path=$b.ManagedKey; Name='urlAllowlist';         Type='MultiString'; Value=$urlAllowlist }
+            @{ Path=$b.ManagedKey; Name='showNotifications';     Type='DWord';  Value=$ShowNotifications },
+            @{ Path=$b.ManagedKey; Name='enableValidPageBadge';  Type='DWord';  Value=$EnableValidPageBadge },
+            @{ Path=$b.ManagedKey; Name='validPageBadgeTimeout'; Type='DWord';  Value=$ValidPageBadgeTimeout },
+            @{ Path=$b.ManagedKey; Name='enablePageBlocking';    Type='DWord';  Value=$EnablePageBlocking },
+            @{ Path=$b.ManagedKey; Name='enableCippReporting';   Type='DWord';  Value=$EnableCippReporting },
+            @{ Path=$b.ManagedKey; Name='cippServerUrl';         Type='String'; Value=$CippServerUrl },
+            @{ Path=$b.ManagedKey; Name='cippTenantId';          Type='String'; Value=$CippTenantId },
+            @{ Path=$b.ManagedKey; Name='customRulesUrl';        Type='String'; Value=$CustomRulesUrl },
+            @{ Path=$b.ManagedKey; Name='updateInterval';        Type='DWord';  Value=$UpdateInterval },
+            @{ Path=$b.ManagedKey; Name='enableDebugLogging';    Type='DWord';  Value=$EnableDebugLogging }
         )
+
+        # URL Allowlist stored as numbered subkey entries (1, 2, 3...) per upstream schema
+        $urlAllowlistItems = @()
+        if($urlAllowlist){
+            for($i = 0; $i -lt $urlAllowlist.Count; $i++){
+                $urlAllowlistItems += @{ Path=$urlAllowlistKey; Name=($i + 1).ToString(); Type='String'; Value=$urlAllowlist[$i] }
+            }
+        }
+
+        # Domain Squatting settings
+        $domainSquattingItems = @(
+            @{ Path=$domainSquattingKey; Name='enabled';            Type='DWord';  Value=$DomainSquattingEnabled },
+            @{ Path=$domainSquattingKey; Name='deviationThreshold'; Type='DWord';  Value=$DomainSquattingDeviationThreshold },
+            @{ Path=$domainSquattingKey; Name='Action';             Type='String'; Value=$DomainSquattingAction },
+            @{ Path=$domainSquattingKey; Name='logDetections';      Type='DWord';  Value=$DomainSquattingLogDetections },
+            @{ Path=$domainSquattingAlgorithmsKey; Name='levenshtein'; Type='DWord'; Value=$DomainSquattingLevenshtein },
+            @{ Path=$domainSquattingAlgorithmsKey; Name='homoglyph';   Type='DWord'; Value=$DomainSquattingHomoglyph },
+            @{ Path=$domainSquattingAlgorithmsKey; Name='typosquat';   Type='DWord'; Value=$DomainSquattingTyposquat },
+            @{ Path=$domainSquattingAlgorithmsKey; Name='combosquat';  Type='DWord'; Value=$DomainSquattingCombosquat }
+        )
+
+        # Domain Squatting protected domains stored as numbered subkey entries (1, 2, 3...)
+        $domainSquattingProtectedDomainsItems = @()
+        if($DomainSquattingProtectedDomains){
+            for($i = 0; $i -lt $DomainSquattingProtectedDomains.Count; $i++){
+                $domainSquattingProtectedDomainsItems += @{ Path=$domainSquattingProtectedDomainsKey; Name=($i + 1).ToString(); Type='String'; Value=$DomainSquattingProtectedDomains[$i] }
+            }
+        }
+
+        # Generic Webhook settings
+        $genericWebhookItems = @(
+            @{ Path=$genericWebhookKey; Name='enabled'; Type='DWord';  Value=$EnableGenericWebhook },
+            @{ Path=$genericWebhookKey; Name='url';     Type='String'; Value=$WebhookUrl }
+        )
+
+        # Webhook events stored as numbered subkey entries (1, 2, 3...)
+        $webhookEventsItems = @()
+        if($WebhookEvents){
+            for($i = 0; $i -lt $WebhookEvents.Count; $i++){
+                $webhookEventsItems += @{ Path=$webhookEventsKey; Name=($i + 1).ToString(); Type='String'; Value=$WebhookEvents[$i] }
+            }
+        }
+
         $brandingItems = @(
-            @{ Path=$brandingKey; Name='companyName';  Type='String'; Value=$CompanyName },
-            @{ Path=$brandingKey; Name='companyURL';   Type='String'; Value=$CompanyUrl },
-            @{ Path=$brandingKey; Name='productName';  Type='String'; Value=$ProductName },
-            @{ Path=$brandingKey; Name='supportEmail'; Type='String'; Value=$SupportEmail },
-            @{ Path=$brandingKey; Name='primaryColor'; Type='String'; Value=$PrimaryColor },
-            @{ Path=$brandingKey; Name='logoUrl';      Type='String'; Value=$LogoUrl }
+            @{ Path=$brandingKey; Name='companyName';      Type='String'; Value=$CompanyName },
+            @{ Path=$brandingKey; Name='productName';      Type='String'; Value=$ProductName },
+            @{ Path=$brandingKey; Name='supportEmail';     Type='String'; Value=$SupportEmail },
+            @{ Path=$brandingKey; Name='supportUrl';       Type='String'; Value=$SupportUrl },
+            @{ Path=$brandingKey; Name='privacyPolicyUrl'; Type='String'; Value=$PrivacyPolicyUrl },
+            @{ Path=$brandingKey; Name='aboutUrl';         Type='String'; Value=$AboutUrl },
+            @{ Path=$brandingKey; Name='primaryColor';     Type='String'; Value=$PrimaryColor },
+            @{ Path=$brandingKey; Name='logoUrl';          Type='String'; Value=$LogoUrl }
         )
+
         $settingsItems = @(
             @{ Path=$b.SettingsKey; Name='update_url';        Type='String'; Value=$b.UpdateUrl },
             @{ Path=$b.SettingsKey; Name='installation_mode'; Type='String'; Value=$InstallationMode }
         )
+        # Toolbar pinning (browser-specific key names)
+        if($ForceToolbarPin -eq 1){
+            if($b.Browser -eq 'Edge'){
+                $settingsItems += @{ Path=$b.SettingsKey; Name='toolbar_state'; Type='String'; Value='force_shown' }
+            } elseif($b.Browser -eq 'Chrome'){
+                $settingsItems += @{ Path=$b.SettingsKey; Name='toolbar_pin'; Type='String'; Value='force_pinned' }
+            }
+        } else {
+            # Explicitly remove toolbar pin values so a previously-pinned extension can be unpinned
+            if($b.Browser -eq 'Edge'){
+                $settingsItems += @{ Path=$b.SettingsKey; Name='toolbar_state'; Type='Remove'; Value=$null }
+            } elseif($b.Browser -eq 'Chrome'){
+                $settingsItems += @{ Path=$b.SettingsKey; Name='toolbar_pin'; Type='Remove'; Value=$null }
+            }
+        }
 
         if($Ensure -eq 'Present'){
-            $policyItems + $brandingItems + $settingsItems | ForEach-Object { $_ }
+            $policyItems + $urlAllowlistItems + $domainSquattingItems + $domainSquattingProtectedDomainsItems + $genericWebhookItems + $webhookEventsItems + $brandingItems + $settingsItems | ForEach-Object { $_ }
         } else {
             # Transform for Absent: null policy & branding values, block extension, drop update_url
             $absentPolicy   = $policyItems   | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
+            $absentUrlAllowlist = $urlAllowlistItems | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
+            $absentDomainSquatting = $domainSquattingItems | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
+            $absentDomainSquattingProtectedDomains = $domainSquattingProtectedDomainsItems | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
+            $absentWebhook  = $genericWebhookItems | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
+            $absentWebhookEvents = $webhookEventsItems | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
             $absentBranding = $brandingItems | ForEach-Object { @{ Path=$_.Path; Name=$_.Name; Type=$_.Type; Value=$null } }
             $absentSettings = @(
                 @{ Path=$b.SettingsKey; Name='installation_mode'; Type='String'; Value='blocked' },
                 @{ Path=$b.SettingsKey; Name='update_url';        Type='Remove'; Value=$null }
             )
-            $absentPolicy + $absentBranding + $absentSettings | ForEach-Object { $_ }
+            # Also clean toolbar pinning values
+            if($b.Browser -eq 'Edge'){
+                $absentSettings += @{ Path=$b.SettingsKey; Name='toolbar_state'; Type='Remove'; Value=$null }
+            } elseif($b.Browser -eq 'Chrome'){
+                $absentSettings += @{ Path=$b.SettingsKey; Name='toolbar_pin'; Type='Remove'; Value=$null }
+            }
+            $absentPolicy + $absentUrlAllowlist + $absentDomainSquatting + $absentDomainSquattingProtectedDomains + $absentWebhook + $absentWebhookEvents + $absentBranding + $absentSettings | ForEach-Object { $_ }
         }
     }
 }
 
+# Resolve effective CIPP Tenant ID: override wins if provided, otherwise fall back to ImmyBot's $azureTenantId
+$effectiveCippTenantId = if(-not [string]::IsNullOrWhiteSpace($CippTenantIdOverride)){ $CippTenantIdOverride } else { $azureTenantId }
+if(-not [string]::IsNullOrWhiteSpace($CippTenantIdOverride)){
+    Write-Host "Using CippTenantIdOverride: $CippTenantIdOverride"
+}
+
 # Input validation beyond attributes
 if($EnableCippReporting -eq 1){
-    if([string]::IsNullOrWhiteSpace($CippServerUrl) -or [string]::IsNullOrWhiteSpace($azureTenantId)){ # $azureTenantId Value supplied by Immy environment
-        throw 'CippServerUrl and CippTenantId must be provided when EnableCippReporting=1.'
+    if([string]::IsNullOrWhiteSpace($CippServerUrl) -or [string]::IsNullOrWhiteSpace($effectiveCippTenantId)){
+        throw 'CippServerUrl and CippTenantId (or CippTenantIdOverride) must be provided when EnableCippReporting=1.'
+    }
+}
+if($EnableGenericWebhook -eq 1){
+    if([string]::IsNullOrWhiteSpace($WebhookUrl)){
+        throw 'WebhookUrl must be provided when EnableGenericWebhook=1.'
     }
 }
 
@@ -243,21 +446,77 @@ $desiredItems = Get-DesiredItem `
     -EdgeUpdateUrl $EdgeUpdateUrl `
     -ShowNotifications $ShowNotifications `
     -EnableValidPageBadge $EnableValidPageBadge `
+    -ValidPageBadgeTimeout $ValidPageBadgeTimeout `
     -EnablePageBlocking $EnablePageBlocking `
     -EnableCippReporting $EnableCippReporting `
     -CippServerUrl $CippServerUrl `
-    -CippTenantId $CippTenantId `
+    -CippTenantId $effectiveCippTenantId `
     -CustomRulesUrl $CustomRulesUrl `
     -UpdateInterval $UpdateInterval `
     -EnableDebugLogging $EnableDebugLogging `
     -urlAllowlist $urlAllowlist `
+    -DomainSquattingEnabled $DomainSquattingEnabled `
+    -DomainSquattingDeviationThreshold $DomainSquattingDeviationThreshold `
+    -DomainSquattingLevenshtein $DomainSquattingLevenshtein `
+    -DomainSquattingHomoglyph $DomainSquattingHomoglyph `
+    -DomainSquattingTyposquat $DomainSquattingTyposquat `
+    -DomainSquattingCombosquat $DomainSquattingCombosquat `
+    -DomainSquattingProtectedDomains $DomainSquattingProtectedDomains `
+    -DomainSquattingAction $DomainSquattingAction `
+    -DomainSquattingLogDetections $DomainSquattingLogDetections `
+    -EnableGenericWebhook $EnableGenericWebhook `
+    -WebhookUrl $WebhookUrl `
+    -WebhookEvents $WebhookEvents `
     -CompanyName $CompanyName `
-    -CompanyUrl $CompanyUrl `
     -ProductName $ProductName `
     -SupportEmail $SupportEmail `
+    -SupportUrl $SupportUrl `
+    -PrivacyPolicyUrl $PrivacyPolicyUrl `
+    -AboutUrl $AboutUrl `
     -PrimaryColor $PrimaryColor `
     -LogoUrl $LogoUrl `
-    -InstallationMode $InstallationMode
+    -InstallationMode $InstallationMode `
+    -ForceToolbarPin $ForceToolbarPin
+
+# Detect and clean stale numbered registry entries on the target machine.
+# The extension actively reads these subkeys; leftover entries from a previously
+# larger array would cause incorrect behavior. Invoke-ImmyCommand runs the
+# scriptblock on the target where native registry cmdlets work.
+if($Ensure -eq 'Absent'){
+    $urlAllowlistExpected = 0
+    $protectedDomainsExpected = 0
+    $webhookEventsExpected = 0
+} else {
+    $urlAllowlistExpected = if($urlAllowlist){ $urlAllowlist.Count } else { 0 }
+    $protectedDomainsExpected = if($DomainSquattingProtectedDomains){ $DomainSquattingProtectedDomains.Count } else { 0 }
+    $webhookEventsExpected = if($WebhookEvents){ $WebhookEvents.Count } else { 0 }
+}
+$staleEntriesClean = Invoke-ImmyCommand {
+    $subkeys = @(
+        @{ Path = "HKLM:\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\$($using:ChromeExtensionId)\policy\urlAllowlist"; Expected = $using:urlAllowlistExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\$($using:ChromeExtensionId)\policy\domainSquatting\protectedDomains"; Expected = $using:protectedDomainsExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Google\Chrome\3rdparty\extensions\$($using:ChromeExtensionId)\policy\genericWebhook\events"; Expected = $using:webhookEventsExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$($using:EdgeExtensionId)\policy\urlAllowlist"; Expected = $using:urlAllowlistExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$($using:EdgeExtensionId)\policy\domainSquatting\protectedDomains"; Expected = $using:protectedDomainsExpected },
+        @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Edge\3rdparty\extensions\$($using:EdgeExtensionId)\policy\genericWebhook\events"; Expected = $using:webhookEventsExpected }
+    )
+    $hasStale = $false
+    foreach($sk in $subkeys){
+        if(Test-Path $sk.Path){
+            $staleNames = @((Get-Item $sk.Path).Property | Where-Object { $_ -match '^\d+$' -and [int]$_ -gt $sk.Expected })
+            if($staleNames.Count -gt 0){
+                $hasStale = $true
+                if($using:Method -eq 'set'){
+                    foreach($name in $staleNames){
+                        Remove-ItemProperty -Path $sk.Path -Name $name -Force -ErrorAction SilentlyContinue
+                    }
+                    Write-Host "Removed $($staleNames.Count) stale entries from $($sk.Path)"
+                }
+            }
+        }
+    }
+    return -not $hasStale
+}
 
 if($Ensure -eq 'Present'){
     # Use ImmyBot helper pipeline for each required value; it internally interprets $method for test/set
@@ -272,9 +531,8 @@ if($Ensure -eq 'Present'){
         }
     }
     if($Method -eq 'test'){
-        # If any helper returned $false mark non-compliant
-        $compliant = ($results -notcontains $false)
-        if($compliant){ Write-Host 'All extension policy settings are compliant (helper).' } else { Write-Host 'One or more policy values are non-compliant.' }
+        $compliant = ($results -notcontains $false) -and $staleEntriesClean
+        if($compliant){ Write-Host 'All extension policy settings are compliant.' } else { Write-Host 'One or more policy values are non-compliant.' }
         return $compliant
     }
 } else { # Ensure = Absent
@@ -289,7 +547,7 @@ if($Ensure -eq 'Present'){
         }
     }
     if($Method -eq 'test'){
-        $compliant = ($results -notcontains $false)
+        $compliant = ($results -notcontains $false) -and $staleEntriesClean
         if($compliant){ Write-Host 'All extension policy values are absent as desired.' } else { Write-Host 'One or more extension policy values still present.' }
         return $compliant
     } elseif($Method -eq 'set'){
