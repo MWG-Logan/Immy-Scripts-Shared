@@ -109,6 +109,10 @@ CIPP Reporting toggle. Maps to "Enable CIPP Reporting".
 CIPP Server URL. Required if EnableCippReporting=1. Blank by default.
 '@)][string]$CippServerUrl = '',
     [Parameter(HelpMessage=@'
+Override the CIPP Tenant ID. By default the ImmyBot-provided `$azureTenantId` is used.
+Set this only if the ImmyBot tenant ID does not match the tenant reported to CIPP.
+'@)][string]$CippTenantIdOverride,
+    [Parameter(HelpMessage=@'
 Custom Rules / Config URL for detection configuration. Blank = unused.
 '@)][string]$CustomRulesUrl = '',
     [Parameter(HelpMessage=@'
@@ -260,6 +264,7 @@ function Get-DesiredItem {
         [int]$EnablePageBlocking,
         [int]$EnableCippReporting,
         [string]$CippServerUrl,
+        [string]$CippTenantId,
         [string]$CustomRulesUrl,
         [int]$UpdateInterval,
         [int]$EnableDebugLogging,
@@ -309,7 +314,7 @@ function Get-DesiredItem {
             @{ Path=$b.ManagedKey; Name='enablePageBlocking';    Type='DWord';  Value=$EnablePageBlocking },
             @{ Path=$b.ManagedKey; Name='enableCippReporting';   Type='DWord';  Value=$EnableCippReporting },
             @{ Path=$b.ManagedKey; Name='cippServerUrl';         Type='String'; Value=$CippServerUrl },
-            @{ Path=$b.ManagedKey; Name='cippTenantId';          Type='String'; Value=$azureTenantId }, # $azureTenantId Value supplied by Immy environment
+            @{ Path=$b.ManagedKey; Name='cippTenantId';          Type='String'; Value=$CippTenantId },
             @{ Path=$b.ManagedKey; Name='customRulesUrl';        Type='String'; Value=$CustomRulesUrl },
             @{ Path=$b.ManagedKey; Name='updateInterval';        Type='DWord';  Value=$UpdateInterval },
             @{ Path=$b.ManagedKey; Name='enableDebugLogging';    Type='DWord';  Value=$EnableDebugLogging }
@@ -407,10 +412,16 @@ function Get-DesiredItem {
     }
 }
 
+# Resolve effective CIPP Tenant ID: override wins if provided, otherwise fall back to ImmyBot's $azureTenantId
+$effectiveCippTenantId = if(-not [string]::IsNullOrWhiteSpace($CippTenantIdOverride)){ $CippTenantIdOverride } else { $azureTenantId }
+if(-not [string]::IsNullOrWhiteSpace($CippTenantIdOverride)){
+    Write-Host "Using CippTenantIdOverride: $CippTenantIdOverride"
+}
+
 # Input validation beyond attributes
 if($EnableCippReporting -eq 1){
-    if([string]::IsNullOrWhiteSpace($CippServerUrl) -or [string]::IsNullOrWhiteSpace($azureTenantId)){ # $azureTenantId Value supplied by Immy environment
-        throw 'CippServerUrl and CippTenantId must be provided when EnableCippReporting=1.'
+    if([string]::IsNullOrWhiteSpace($CippServerUrl) -or [string]::IsNullOrWhiteSpace($effectiveCippTenantId)){
+        throw 'CippServerUrl and CippTenantId (or CippTenantIdOverride) must be provided when EnableCippReporting=1.'
     }
 }
 if($EnableGenericWebhook -eq 1){
@@ -432,6 +443,7 @@ $desiredItems = Get-DesiredItem `
     -EnablePageBlocking $EnablePageBlocking `
     -EnableCippReporting $EnableCippReporting `
     -CippServerUrl $CippServerUrl `
+    -CippTenantId $effectiveCippTenantId `
     -CustomRulesUrl $CustomRulesUrl `
     -UpdateInterval $UpdateInterval `
     -EnableDebugLogging $EnableDebugLogging `
