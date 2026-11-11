@@ -29,7 +29,10 @@ $EnrollerScript = {
 $enrolled = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Enrollments' -ErrorAction SilentlyContinue |
     ForEach-Object { Get-ItemProperty -Path $_.PSPath } |
     Where-Object { $_.ProviderID -eq 'MS DM Server' }
-if ($enrolled) { exit 0 }
+$cert = Get-ChildItem 'Cert:\LocalMachine\My' |
+    Where-Object { $_.Issuer -like '*Microsoft Intune MDM Device CA*' -and $_.NotAfter -gt (Get-Date) }
+# Same test as Get-IntuneEnrollmentState below: key AND unexpired certificate
+if ($enrolled -and $cert) { exit 0 }
 # Give the logon time to finish so the user's Entra token is available
 Start-Sleep -Seconds 60
 & "$env:windir\System32\deviceenroller.exe" /c /AutoEnrollMDM

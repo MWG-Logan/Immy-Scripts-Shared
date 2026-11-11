@@ -136,12 +136,19 @@ switch ($method) {
             #$User = "NT AUTHORITY\INTERACTIVE"
             #$principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive
 
-            Register-ScheduledTask `
-                -Action $action `
-                -Principal $Principal `
-                -Trigger $buildtrigger `
-                -TaskName $using:TaskName `
-                -Description $using:TaskDesc
+            $registerParams = @{
+                Action      = $action
+                Principal   = $principal
+                Trigger     = $buildtrigger
+                TaskName    = $using:TaskName
+                Description = $using:TaskDesc
+            }
+            if ($using:Scope -eq 'System') {
+                # Task Scheduler defaults skip the task on battery and stop it when unplugged.
+                # Only applied to System scope so existing User-scope callers keep their defaults.
+                $registerParams.Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            }
+            Register-ScheduledTask @registerParams
         }
         Write-Progress -Activity "Setting Scheduled Task" -CurrentOperation "Task configured" -PercentComplete 95 -Id 2
         Write-Progress -Activity "Setting Scheduled Task" -CurrentOperation "Enforcement complete" -Completed -Id 2
