@@ -7,7 +7,8 @@ Deploy to Entra-joined computers only.
 
 TEST passes only when this PC is really enrolled in Intune:
   - an enrollment key with ProviderID "MS DM Server", and
-  - an unexpired Intune MDM device certificate in the machine store.
+  - an unexpired Intune MDM device certificate, in the machine store or the SYSTEM account's
+    personal store (user-driven enrollments keep it there; everything here runs as SYSTEM).
 The registry policy values are NOT part of the test. They are only a means to enroll.
 
 SET, when the PC is not enrolled:
@@ -29,7 +30,7 @@ $EnrollerScript = {
 $enrolled = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Enrollments' -ErrorAction SilentlyContinue |
     ForEach-Object { Get-ItemProperty -Path $_.PSPath } |
     Where-Object { $_.ProviderID -eq 'MS DM Server' }
-$cert = Get-ChildItem 'Cert:\LocalMachine\My' |
+$cert = Get-ChildItem 'Cert:\LocalMachine\My', 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
     Where-Object { $_.Issuer -like '*Microsoft Intune MDM Device CA*' -and $_.NotAfter -gt (Get-Date) }
 # Same test as Get-IntuneEnrollmentState below: key AND unexpired certificate
 if ($enrolled -and $cert) { exit 0 }
@@ -49,7 +50,7 @@ function Get-IntuneEnrollmentState {
             Where-Object { $_.ProviderID -eq 'MS DM Server' } |
             Select-Object -First 1
 
-        $cert = Get-ChildItem 'Cert:\LocalMachine\My' |
+        $cert = Get-ChildItem 'Cert:\LocalMachine\My', 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
             Where-Object { $_.Issuer -like '*Microsoft Intune MDM Device CA*' -and $_.NotAfter -gt (Get-Date) } |
             Sort-Object NotAfter -Descending |
             Select-Object -First 1
@@ -69,6 +70,10 @@ function Get-IntuneEnrollmentState {
 }
 
 $State = Get-IntuneEnrollmentState
+# A dropped agent connection returns nothing. That is not a verdict on the join or the enrollment.
+if (-not $State) {
+    throw "Could not read the enrollment state from this PC (the agent connection failed). Nothing was changed; this is not a verdict on enrollment."
+}
 
 # Guard rails: refuse to touch a PC that is not joined to the tenant Immy thinks it belongs to
 if ([string]::IsNullOrWhiteSpace($AzureTenantId)) {
