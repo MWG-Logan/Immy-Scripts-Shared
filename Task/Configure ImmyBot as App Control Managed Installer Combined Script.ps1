@@ -42,8 +42,8 @@ $RuleId = '5d2a7c3e-9b41-4f0a-8c6d-1e7f3a9b2c54'
 $PublisherName = 'O=IMMYBOT LLC, L=BATON ROUGE, S=LOUISIANA, C=US'
 $ProductName = 'IMMYBOT.AGENT'
 $RestartTaskName = 'ImmyBot agent restart (managed installer)'
-# Invoke-ImmyCommand defaults to 120 seconds. Reading the effective AppLocker policy plus the probe has
-# taken longer than that on some PCs, which failed Test with "Script timed out after 120 seconds".
+# Invoke-ImmyCommand defaults to 120 seconds. The state check has taken longer than that on some PCs
+# (mostly a slow scheduled-task lookup), which failed Test with "Script timed out after 120 seconds".
 $CommandTimeoutSeconds = 600
 
 $PolicyXml = @"
@@ -134,7 +134,8 @@ function Get-ManagedInstallerState {
             # UTC round-trip format: keeps fractional seconds and still sorts correctly as a string
             CompiledPolicy    = if ($compiled) { $compiled.LastWriteTimeUtc.ToString('o') } else { '' }
             DeviceTime        = (Get-Date).ToUniversalTime().ToString('o')
-            RestartTaskExists = [bool](Get-ScheduledTask -TaskName $using:RestartTaskName -ErrorAction SilentlyContinue)
+            # -TaskPath matters: a name-only lookup searches every task folder and took 260 s on one PC
+            RestartTaskExists = [bool](Get-ScheduledTask -TaskPath '\' -TaskName $using:RestartTaskName -ErrorAction SilentlyContinue)
             AppIdDriverStart  = "$appIdDriverStart"
             CompiledFiles     = (@(Get-ChildItem -LiteralPath $compiledDir -Filter '*.AppLocker' -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Length)B@$($_.LastWriteTimeUtc.ToString('s'))Z" }) -join ', ')
             PolicyConverter   = if ($converter) { "last run $($converter.LastRunTime.ToString('s')), result 0x$('{0:X}' -f $converter.LastTaskResult)" } else { 'task not found' }
@@ -151,13 +152,13 @@ function Restart-ImmyAgentAndWait {
         $trigger.EndBoundary = $when.AddMinutes(10).ToString('s')
         $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
         $settings = New-ScheduledTaskSettingsSet -DeleteExpiredTaskAfter (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName $using:RestartTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        Register-ScheduledTask -TaskPath '\' -TaskName $using:RestartTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
     }
     Write-Host "ImmyBot agent restart scheduled. Waiting for the agent to come back."
     Start-Sleep -Seconds 50
     $state = Get-ManagedInstallerState
     if ($state.RestartTaskExists) {
-        Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds { Unregister-ScheduledTask -TaskName $using:RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue }
+        Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds { Unregister-ScheduledTask -TaskPath '\' -TaskName $using:RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue }
     }
     return $state
 }
