@@ -91,14 +91,24 @@ switch ($method) {
         Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Description Comparison finished with result: $Test_DescResult" -PercentComplete 80 -Id 1
 
         # The task must run as SYSTEM exactly when -Scope System was asked for
-        $TaskRunsAsSystem = [bool](Invoke-ImmyCommand {
+        # and its action must run the script this function manages for that scope. Without the
+        # action check, a SYSTEM task pointing at the user-writable C:\ScheduledTasks folder would
+        # pass as long as the copy under Program Files matched.
+        $Registered = Invoke-ImmyCommand {
             $existing = Get-ScheduledTask | Where-Object {$_.TaskName -like $using:TaskName} | Select-Object -First 1
-            $existing.Principal.UserId -eq 'SYSTEM'
-        })
-        $Test_ScopeResult = ( $TaskRunsAsSystem -eq ($Scope -eq 'System') )
+            $actions = @($existing.Actions)
+            [pscustomobject]@{
+                RunsAsSystem  = [bool]($existing.Principal.UserId -eq 'SYSTEM')
+                RunsOurScript = [bool]($actions.Count -eq 1 -and ([string]$actions[0].Arguments).Contains("`"$($using:scriptPath)`""))
+            }
+        }
+        $Test_ScopeResult = ( [bool]$Registered.RunsAsSystem -eq ($Scope -eq 'System') )
         Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Scope Comparison finished with result: $Test_ScopeResult" -PercentComplete 85 -Id 1
 
-        $TestResult = ( $Test_DescResult -and $Test_ScriptResult -and $Test_ScopeResult )
+        $Test_ActionResult = [bool]$Registered.RunsOurScript
+        Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Action Comparison finished with result: $Test_ActionResult" -PercentComplete 90 -Id 1
+
+        $TestResult = ( $Test_DescResult -and $Test_ScriptResult -and $Test_ScopeResult -and $Test_ActionResult )
         Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Validation finished with result: $TestResult" -Completed -Id 1
 
         $TestResult
