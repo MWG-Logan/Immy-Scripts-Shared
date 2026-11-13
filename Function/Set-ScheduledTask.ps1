@@ -13,11 +13,23 @@ param(
     [string]$Timing,
 
     [Parameter(Mandatory=$true)]
-    [scriptblock]$ScriptContent
+    [scriptblock]$ScriptContent,
+
+    # User   = task runs as the logged-on user (BUILTIN\Users, limited). This is the original behaviour and the default.
+    # System = task runs as NT AUTHORITY\SYSTEM. The script is stored under Program Files so standard users cannot modify it.
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("User", "System")]
+    [Alias("Context")]
+    [string]$Scope = "User"
 )
 $task = Invoke-ImmyCommand { Get-ScheduledTask | Where-Object {$_.TaskName -like $using:TaskName} -ErrorAction SilentlyContinue }
-$scriptDir = "C:\ScheduledTasks"
-$scriptPath = "C:\ScheduledTasks\$TaskName.ps1"
+if ($Scope -eq 'System') {
+    # A SYSTEM task must never run a script from a folder standard users can write to.
+    $scriptDir = "C:\Program Files\ScheduledTasks"
+} else {
+    $scriptDir = "C:\ScheduledTasks"
+}
+$scriptPath = "$scriptDir\$TaskName.ps1"
 
 function Test-ScheduledTaskScript {
     $CurrentScriptContent = Invoke-ImmyCommand { Get-Content -Path $using:scriptPath -raw -Encoding utf8 }
@@ -78,7 +90,25 @@ switch ($method) {
         $Test_DescResult = ( $task.Description -eq $TaskDesc )
         Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Description Comparison finished with result: $Test_DescResult" -PercentComplete 80 -Id 1
 
-        $TestResult = ( $Test_DescResult -and $Test_ScriptResult )
+        # The task must run as SYSTEM exactly when -Scope System was asked for
+        # and its action must run the script this function manages for that scope. Without the
+        # action check, a SYSTEM task pointing at the user-writable C:\ScheduledTasks folder would
+        # pass as long as the copy under Program Files matched.
+        $Registered = Invoke-ImmyCommand {
+            $existing = Get-ScheduledTask | Where-Object {$_.TaskName -like $using:TaskName} | Select-Object -First 1
+            $actions = @($existing.Actions)
+            [pscustomobject]@{
+                RunsAsSystem  = [bool]($existing.Principal.UserId -eq 'SYSTEM')
+                RunsOurScript = [bool]($actions.Count -eq 1 -and ([string]$actions[0].Arguments).Contains("`"$($using:scriptPath)`""))
+            }
+        }
+        $Test_ScopeResult = ( [bool]$Registered.RunsAsSystem -eq ($Scope -eq 'System') )
+        Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Scope Comparison finished with result: $Test_ScopeResult" -PercentComplete 85 -Id 1
+
+        $Test_ActionResult = [bool]$Registered.RunsOurScript
+        Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Action Comparison finished with result: $Test_ActionResult" -PercentComplete 90 -Id 1
+
+        $TestResult = ( $Test_DescResult -and $Test_ScriptResult -and $Test_ScopeResult -and $Test_ActionResult )
         Write-Progress -Activity "Testing Scheduled Task" -CurrentOperation "Validation finished with result: $TestResult" -Completed -Id 1
 
         $TestResult
@@ -108,16 +138,27 @@ switch ($method) {
             }
             # Build the task
             $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -file `"$using:scriptPath`""
-            $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Users" -RunLevel limited
+            if ($using:Scope -eq 'System') {
+                $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+            } else {
+                $principal = New-ScheduledTaskPrincipal -GroupId "BUILTIN\Users" -RunLevel limited
+            }
             #$User = "NT AUTHORITY\INTERACTIVE"
             #$principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive
 
-            Register-ScheduledTask `
-                -Action $action `
-                -Principal $Principal `
-                -Trigger $buildtrigger `
-                -TaskName $using:TaskName `
-                -Description $using:TaskDesc
+            $registerParams = @{
+                Action      = $action
+                Principal   = $principal
+                Trigger     = $buildtrigger
+                TaskName    = $using:TaskName
+                Description = $using:TaskDesc
+            }
+            if ($using:Scope -eq 'System') {
+                # Task Scheduler defaults skip the task on battery and stop it when unplugged.
+                # Only applied to System scope so existing User-scope callers keep their defaults.
+                $registerParams.Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            }
+            Register-ScheduledTask @registerParams
         }
         Write-Progress -Activity "Setting Scheduled Task" -CurrentOperation "Task configured" -PercentComplete 95 -Id 2
         Write-Progress -Activity "Setting Scheduled Task" -CurrentOperation "Enforcement complete" -Completed -Id 2
