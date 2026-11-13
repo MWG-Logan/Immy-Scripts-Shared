@@ -26,6 +26,11 @@ Windows applies a changed AppLocker policy in the background, which has taken tw
 on real PCs. The agent only picks up a change if it starts after that, so Set (both directions)
 asks Windows to compile the policy straight away, waits for it before restarting the agent, and
 retries the restart if tagging has not started.
+
+If Windows never writes ManagedInstaller.AppLocker, Set fails straight away with the AppID driver
+start type and the compiled policy files, instead of restarting the agent. On some PCs the AppID
+driver stays DEMAND_START after "appidtel.exe start" and the compiled policy never appears;
+restarting the agent cannot fix that.
 #>
 param(
     [Parameter(Mandatory = $false)]
@@ -37,6 +42,9 @@ $RuleId = '5d2a7c3e-9b41-4f0a-8c6d-1e7f3a9b2c54'
 $PublisherName = 'O=IMMYBOT LLC, L=BATON ROUGE, S=LOUISIANA, C=US'
 $ProductName = 'IMMYBOT.AGENT'
 $RestartTaskName = 'ImmyBot agent restart (managed installer)'
+# Invoke-ImmyCommand defaults to 120 seconds. Reading the effective AppLocker policy plus the probe has
+# taken longer than that on some PCs, which failed Test with "Script timed out after 120 seconds".
+$CommandTimeoutSeconds = 600
 
 $PolicyXml = @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -84,7 +92,7 @@ $PolicyXml = @"
 "@
 
 function Get-ManagedInstallerState {
-    Invoke-ImmyCommand -AgentConnectionWaitTimeout (New-TimeSpan -Minutes 5) {
+    Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds -AgentConnectionWaitTimeout (New-TimeSpan -Minutes 5) {
         $ruleId = $using:RuleId
         [xml]$effective = Get-AppLockerPolicy -Effective -Xml
         $collections = @($effective.AppLockerPolicy.ChildNodes | Where-Object { $_.LocalName -eq 'RuleCollection' })
@@ -107,8 +115,12 @@ function Get-ManagedInstallerState {
             Remove-Item -LiteralPath $probeDir -Recurse -Force -ErrorAction SilentlyContinue
         }
 
-        $compiled = Get-Item (Join-Path $env:windir (Join-Path 'System32' (Join-Path 'AppLocker' 'ManagedInstaller.AppLocker'))) -ErrorAction SilentlyContinue
+        $compiledDir = Join-Path $env:windir 'System32\AppLocker'
+        $compiled = Get-Item (Join-Path $compiledDir 'ManagedInstaller.AppLocker') -ErrorAction SilentlyContinue
         $agent = Get-Process -Name 'Immybot.Agent' -ErrorAction SilentlyContinue | Sort-Object StartTime | Select-Object -First 1
+        $converter = Get-ScheduledTask -TaskPath '\Microsoft\Windows\AppID\' -TaskName 'PolicyConverter' -ErrorAction SilentlyContinue | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+        # 0 = BOOT_START (what appidtel.exe start leaves on working PCs), 3 = DEMAND_START
+        $appIdDriverStart = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\AppID' -Name Start -ErrorAction SilentlyContinue).Start
         [pscustomobject]@{
             RulePresent       = [bool]($miRules | Where-Object { $_.Id -eq $ruleId })
             OtherMiRules      = @($miRules | Where-Object { $_.Id -ne $ruleId }).Count
@@ -123,13 +135,16 @@ function Get-ManagedInstallerState {
             CompiledPolicy    = if ($compiled) { $compiled.LastWriteTimeUtc.ToString('o') } else { '' }
             DeviceTime        = (Get-Date).ToUniversalTime().ToString('o')
             RestartTaskExists = [bool](Get-ScheduledTask -TaskName $using:RestartTaskName -ErrorAction SilentlyContinue)
+            AppIdDriverStart  = "$appIdDriverStart"
+            CompiledFiles     = (@(Get-ChildItem -LiteralPath $compiledDir -Filter '*.AppLocker' -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Length)B@$($_.LastWriteTimeUtc.ToString('s'))Z" }) -join ', ')
+            PolicyConverter   = if ($converter) { "last run $($converter.LastRunTime.ToString('s')), result 0x$('{0:X}' -f $converter.LastTaskResult)" } else { 'task not found' }
         }
     }
 }
 
 function Restart-ImmyAgentAndWait {
     # A session cannot restart the agent it is running under, so a self-deleting scheduled task does it.
-    Invoke-ImmyCommand {
+    Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds {
         $when = (Get-Date).AddSeconds(15)
         $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -Command "Restart-Service -Name ''ImmyBot Agent'' -Force"'
         $trigger = New-ScheduledTaskTrigger -Once -At $when
@@ -142,14 +157,14 @@ function Restart-ImmyAgentAndWait {
     Start-Sleep -Seconds 50
     $state = Get-ManagedInstallerState
     if ($state.RestartTaskExists) {
-        Invoke-ImmyCommand { Unregister-ScheduledTask -TaskName $using:RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue }
+        Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds { Unregister-ScheduledTask -TaskName $using:RestartTaskName -Confirm:$false -ErrorAction SilentlyContinue }
     }
     return $state
 }
 
 function Get-CompiledPolicyTime {
     # Lightweight poll: only the compiled ManagedInstaller policy's write time (UTC, 'o'), or '' if the file is absent
-    Invoke-ImmyCommand {
+    Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds {
         $compiled = Get-Item (Join-Path $env:windir 'System32\AppLocker\ManagedInstaller.AppLocker') -ErrorAction SilentlyContinue
         if ($compiled) { $compiled.LastWriteTimeUtc.ToString('o') } else { '' }
     }
@@ -157,7 +172,7 @@ function Get-CompiledPolicyTime {
 
 function Start-AppLockerPolicyCompile {
     # Ask Windows to compile the AppLocker policy now; left alone it has taken two to four minutes
-    Invoke-ImmyCommand {
+    Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds {
         Start-ScheduledTask -TaskPath '\Microsoft\Windows\AppID\' -TaskName 'PolicyConverter' -ErrorAction SilentlyContinue
     }
 }
@@ -166,7 +181,8 @@ function Wait-ManagedInstallerPolicyCompiled {
     # Waits until Windows has compiled the AppLocker policy that was changed at $Since (device UTC, 'o' format).
     # -AllowMissing: also done when the compiled file is gone, which can happen when the last
     # ManagedInstaller collection is removed.
-    param([string]$Since, [switch]$AllowMissing, [int]$TimeoutSeconds = 480)
+    # 240 s: with PolicyConverter started the compile has landed within seconds; untriggered it took 2-4 min.
+    param([string]$Since, [switch]$AllowMissing, [int]$TimeoutSeconds = 240)
     $waited = 0
     while ($true) {
         $compiled = Get-CompiledPolicyTime
@@ -194,7 +210,7 @@ switch ($method) {
     }
 
     'test' {
-        $summary = "rule present: $($State.RulePresent); files written by ImmyBot are tagged: $($State.ProbeTagged); other managed installer rules: $($State.OtherMiRules); Exe=$($State.ExeMode) Dll=$($State.DllMode)"
+        $summary = "rule present: $($State.RulePresent); files written by ImmyBot are tagged: $($State.ProbeTagged); other managed installer rules: $($State.OtherMiRules); Exe=$($State.ExeMode) Dll=$($State.DllMode); AppID driver start type: $($State.AppIdDriverStart); compiled policy files: '$($State.CompiledFiles)'"
         if ($compliant) { Write-Host "ImmyBot managed installer is $ManagedInstallerState. $summary" }
         else { Write-Warning "ImmyBot managed installer is NOT $ManagedInstallerState. $summary" }
         return [bool]$compliant
@@ -218,7 +234,7 @@ switch ($method) {
                         throw "This PC already has an AppLocker policy with an Exe or Dll collection in '$mode' mode (Exe=$($State.ExeMode), Dll=$($State.DllMode)). Merging the managed installer rule into that can start blocking programs or services. Not changing it."
                     }
                 }
-                $changedAt = Invoke-ImmyCommand {
+                $changedAt = Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds {
                     $file = Join-Path $env:windir 'Temp\immybot-managed-installer.xml'
                     try {
                         Set-Content -Path $file -Value $using:PolicyXml -Encoding UTF8
@@ -234,14 +250,19 @@ switch ($method) {
 
             # Runs on every onboarding Set, not just right after the merge, so a run that merged the rule
             # but failed here is repaired by the next run. appidtel.exe start is safe to repeat.
-            Invoke-ImmyCommand {
+            Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds {
                 $out = (& "$env:windir\System32\appidtel.exe" start 2>&1 | Out-String)
                 if ($LASTEXITCODE -ne 0) { throw "appidtel.exe start failed with exit code $LASTEXITCODE. $out" }
             }
             Write-Host "Managed installer tracking is on."
             Start-AppLockerPolicyCompile
             $State = Wait-ManagedInstallerPolicyCompiled -Since $changedAt
-            if (-not $State.RulePresent) { throw "The AppLocker merge reported success but the ImmyBot rule is not in the effective policy (compiled policy time: '$($State.CompiledPolicy)')." }
+            $diagnostics = "AppID driver start type: $($State.AppIdDriverStart) (0 = boot start, expected after appidtel.exe start). Compiled policy files: '$($State.CompiledFiles)'. PolicyConverter: $($State.PolicyConverter). AppIDSvc=$($State.AppIdSvc), filter=$($State.AppLockerFilter)."
+            if (-not $State.RulePresent) { throw "The AppLocker merge reported success but the ImmyBot rule is not in the effective policy. $diagnostics" }
+            if (-not $State.ProbeTagged -and -not ($State.CompiledPolicy -and $State.CompiledPolicy -ge $changedAt)) {
+                # Restarting the agent cannot help until Windows has compiled the policy, so stop here
+                throw "The rule is in place but Windows has not compiled the managed installer policy (ManagedInstaller.AppLocker is missing or older than the change). Not restarting the agent. $diagnostics"
+            }
 
             $attempt = 0
             while (-not $State.ProbeTagged -and $attempt -lt 3) {
@@ -253,7 +274,7 @@ switch ($method) {
                 $State = Restart-ImmyAgentAndWait
             }
             if (-not $State.ProbeTagged) {
-                throw "The rule is in place and the agent was restarted $attempt times (agent started $($State.AgentStarted), policy compiled '$($State.CompiledPolicy)'), but files written by ImmyBot are still not tagged. AppIDSvc=$($State.AppIdSvc), filter=$($State.AppLockerFilter)."
+                throw "The rule is in place and the agent was restarted $attempt times (agent started $($State.AgentStarted), policy compiled '$($State.CompiledPolicy)'), but files written by ImmyBot are still not tagged. AppID driver start type: $($State.AppIdDriverStart). Compiled policy files: '$($State.CompiledFiles)'. AppIDSvc=$($State.AppIdSvc), filter=$($State.AppLockerFilter)."
             }
             Write-Host "ImmyBot is onboarded as a managed installer. Files it writes are tagged."
             return
@@ -261,7 +282,7 @@ switch ($method) {
 
         # Offboarded
         if ($State.RulePresent) {
-            $removedAt = Invoke-ImmyCommand {
+            $removedAt = Invoke-ImmyCommand -Timeout $CommandTimeoutSeconds {
                 # Edit the LOCAL policy only. The effective policy includes domain GPO rules, and writing
                 # that back would copy them into local policy, where they outlive the GPO.
                 [xml]$local = Get-AppLockerPolicy -Local -Xml
