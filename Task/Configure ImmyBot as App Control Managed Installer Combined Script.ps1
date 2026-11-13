@@ -5,8 +5,10 @@ Onboarded : merges an AppLocker ManagedInstaller rule for the ImmyBot agent (sig
             turns on managed installer tracking, and restarts the ImmyBot agent once so it runs
             under the rule. Files ImmyBot installs are then tagged, and an App Control policy with
             "Enabled:Managed Installer" trusts them.
-Offboarded: removes only the ImmyBot rule from the AppLocker policy, the same way Microsoft's
-            CatCleanIMEOnly.ps1 removes the Intune rule, and restarts the agent once.
+Offboarded: removes only the ImmyBot rule from the local AppLocker policy, the same way Microsoft's
+            CatCleanIMEOnly.ps1 removes the Intune rule, waits for Windows to apply that, and
+            restarts the agent once. The Exe/Dll AuditOnly placeholder collections and managed
+            installer tracking stay, because other managed installers may rely on them.
 
 TEST is functional, not just "is the rule there": it writes a probe file through ImmyBot and checks
 whether Windows tagged it ($KERNEL.SMARTLOCKER.ORIGINCLAIM). The probe is deleted straight away.
@@ -21,8 +23,9 @@ Refuses Windows builds older than 15063 (Windows 10 1703). Managed installer doe
 so that includes Server 2016 and Server 2012 R2.
 
 Windows applies a changed AppLocker policy in the background, which has taken two to four minutes
-on real PCs. The agent only runs under the rule if it starts after that, so Set waits for the
-compiled policy before restarting the agent, and retries the restart if tagging has not started.
+on real PCs. The agent only picks up a change if it starts after that, so Set (both directions)
+asks Windows to compile the policy straight away, waits for it before restarting the agent, and
+retries the restart if tagging has not started.
 #>
 param(
     [Parameter(Mandatory = $false)]
@@ -116,8 +119,9 @@ function Get-ManagedInstallerState {
             ProbeTagged       = $tagged
             AgentStarted      = if ($agent) { $agent.StartTime.ToString('s') } else { '' }
             OsBuild           = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
-            CompiledPolicy    = if ($compiled) { $compiled.LastWriteTime.ToString('s') } else { '' }
-            DeviceTime        = (Get-Date).ToString('s')
+            # UTC round-trip format: keeps fractional seconds and still sorts correctly as a string
+            CompiledPolicy    = if ($compiled) { $compiled.LastWriteTimeUtc.ToString('o') } else { '' }
+            DeviceTime        = (Get-Date).ToUniversalTime().ToString('o')
             RestartTaskExists = [bool](Get-ScheduledTask -TaskName $using:RestartTaskName -ErrorAction SilentlyContinue)
         }
     }
@@ -143,19 +147,40 @@ function Restart-ImmyAgentAndWait {
     return $state
 }
 
+function Get-CompiledPolicyTime {
+    # Lightweight poll: only the compiled ManagedInstaller policy's write time (UTC, 'o'), or '' if the file is absent
+    Invoke-ImmyCommand {
+        $compiled = Get-Item (Join-Path $env:windir 'System32\AppLocker\ManagedInstaller.AppLocker') -ErrorAction SilentlyContinue
+        if ($compiled) { $compiled.LastWriteTimeUtc.ToString('o') } else { '' }
+    }
+}
+
+function Start-AppLockerPolicyCompile {
+    # Ask Windows to compile the AppLocker policy now; left alone it has taken two to four minutes
+    Invoke-ImmyCommand {
+        Start-ScheduledTask -TaskPath '\Microsoft\Windows\AppID\' -TaskName 'PolicyConverter' -ErrorAction SilentlyContinue
+    }
+}
+
 function Wait-ManagedInstallerPolicyCompiled {
-    # Waits until Windows has compiled the AppLocker policy that was merged at $Since (device local time).
-    param([string]$Since, [int]$TimeoutSeconds = 480)
+    # Waits until Windows has compiled the AppLocker policy that was changed at $Since (device UTC, 'o' format).
+    # -AllowMissing: also done when the compiled file is gone, which can happen when the last
+    # ManagedInstaller collection is removed.
+    param([string]$Since, [switch]$AllowMissing, [int]$TimeoutSeconds = 480)
     $waited = 0
-    $state = Get-ManagedInstallerState
-    while ((-not $state.CompiledPolicy -or $state.CompiledPolicy -lt $Since) -and $waited -lt $TimeoutSeconds) {
+    while ($true) {
+        $compiled = Get-CompiledPolicyTime
+        $done = ($compiled -and $compiled -ge $Since) -or ($AllowMissing -and -not $compiled)
+        if ($done -or $waited -ge $TimeoutSeconds) { break }
         Start-Sleep -Seconds 5
         $waited += 5
-        $state = Get-ManagedInstallerState
     }
-    if ($state.CompiledPolicy -and $state.CompiledPolicy -ge $Since) { Write-Host "Windows compiled the AppLocker policy at $($state.CompiledPolicy), after waiting $waited seconds." }
-    else { Write-Warning "Windows has not compiled the new AppLocker policy after $waited seconds (compiled policy time: '$($state.CompiledPolicy)')." }
-    return $state
+    if ($done) {
+        if ($compiled) { Write-Host "Windows compiled the AppLocker policy at $compiled, after waiting $waited seconds." }
+        else { Write-Host "Windows removed the compiled managed installer policy, after waiting $waited seconds." }
+    }
+    else { Write-Warning "Windows has not compiled the changed AppLocker policy after $waited seconds (compiled policy time: '$compiled')." }
+    return Get-ManagedInstallerState
 }
 
 $MinimumBuild = 15063
@@ -185,35 +210,38 @@ switch ($method) {
             if ($State.OsBuild -lt $MinimumBuild) {
                 throw "This computer runs Windows build $($State.OsBuild). Managed installer needs build $MinimumBuild (Windows 10 1703) or later. Not changing it."
             }
-            $mergedAt = ''
+            # Since '0': any compiled policy counts. Used when the rule came from an earlier run.
+            $changedAt = '0'
             if (-not $State.RulePresent) {
                 foreach ($mode in @($State.ExeMode, $State.DllMode)) {
                     if ($mode -eq 'Enabled' -or $mode -eq 'NotConfigured') {
                         throw "This PC already has an AppLocker policy with an Exe or Dll collection in '$mode' mode (Exe=$($State.ExeMode), Dll=$($State.DllMode)). Merging the managed installer rule into that can start blocking programs or services. Not changing it."
                     }
                 }
-                $mergedAt = $State.DeviceTime
-                Invoke-ImmyCommand {
+                $changedAt = Invoke-ImmyCommand {
                     $file = Join-Path $env:windir 'Temp\immybot-managed-installer.xml'
                     try {
                         Set-Content -Path $file -Value $using:PolicyXml -Encoding UTF8
+                        $at = (Get-Date).ToUniversalTime().ToString('o')
                         Set-AppLockerPolicy -XmlPolicy $file -Merge -ErrorAction Stop
                     } finally {
                         Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
                     }
-                    $out = (& "$env:windir\System32\appidtel.exe" start 2>&1 | Out-String)
-                    if ($LASTEXITCODE -ne 0) { throw "appidtel.exe start failed with exit code $LASTEXITCODE. $out" }
-                    # Ask Windows to compile the new policy now; left alone it has taken two to four minutes
-                    Start-ScheduledTask -TaskPath '\Microsoft\Windows\AppID\' -TaskName 'PolicyConverter' -ErrorAction SilentlyContinue
+                    $at
                 }
-                Write-Host "Merged the ImmyBot managed installer rule and turned on tracking."
-                $State = Wait-ManagedInstallerPolicyCompiled -Since $mergedAt
-                if (-not $State.RulePresent) { throw "The AppLocker merge reported success but the ImmyBot rule is not in the effective policy (compiled policy time: '$($State.CompiledPolicy)')." }
+                Write-Host "Merged the ImmyBot managed installer rule."
             }
-            elseif (-not $State.ProbeTagged -and -not $State.CompiledPolicy) {
-                # Rule merged by an earlier run that Windows has not compiled yet
-                $State = Wait-ManagedInstallerPolicyCompiled -Since '0'
+
+            # Runs on every onboarding Set, not just right after the merge, so a run that merged the rule
+            # but failed here is repaired by the next run. appidtel.exe start is safe to repeat.
+            Invoke-ImmyCommand {
+                $out = (& "$env:windir\System32\appidtel.exe" start 2>&1 | Out-String)
+                if ($LASTEXITCODE -ne 0) { throw "appidtel.exe start failed with exit code $LASTEXITCODE. $out" }
             }
+            Write-Host "Managed installer tracking is on."
+            Start-AppLockerPolicyCompile
+            $State = Wait-ManagedInstallerPolicyCompiled -Since $changedAt
+            if (-not $State.RulePresent) { throw "The AppLocker merge reported success but the ImmyBot rule is not in the effective policy (compiled policy time: '$($State.CompiledPolicy)')." }
 
             $attempt = 0
             while (-not $State.ProbeTagged -and $attempt -lt 3) {
@@ -233,26 +261,33 @@ switch ($method) {
 
         # Offboarded
         if ($State.RulePresent) {
-            Invoke-ImmyCommand {
-                [xml]$effective = Get-AppLockerPolicy -Effective -Xml
-                Write-Host "AppLocker policy before the change: $($effective.OuterXml)"
-                $new = $effective.Clone()
+            $removedAt = Invoke-ImmyCommand {
+                # Edit the LOCAL policy only. The effective policy includes domain GPO rules, and writing
+                # that back would copy them into local policy, where they outlive the GPO.
+                [xml]$local = Get-AppLockerPolicy -Local -Xml
+                Write-Host "Local AppLocker policy before the change: $($local.OuterXml)"
+                $new = $local.Clone()
                 $mi = $new.AppLockerPolicy.ChildNodes | Where-Object { $_.LocalName -eq 'RuleCollection' -and $_.Type -eq 'ManagedInstaller' }
                 $rule = $mi.ChildNodes | Where-Object { $_.LocalName -eq 'FilePublisherRule' -and $_.Id -eq $using:RuleId }
+                if (-not $rule) { throw "The ImmyBot rule (id $($using:RuleId)) is in the effective AppLocker policy but not in the local policy, so it comes from Group Policy or another source. Remove it there." }
                 $condition = $rule.ChildNodes | ForEach-Object { $_.ChildNodes } | Where-Object { $_.LocalName -eq 'FilePublisherCondition' -and $_.PublisherName -eq $using:PublisherName }
-                if (-not $rule -or -not $condition) { throw "Found rule id $($using:RuleId) but it is not the ImmyBot LLC publisher rule. Not removing it." }
+                if (-not $condition) { throw "Found rule id $($using:RuleId) but it is not the ImmyBot LLC publisher rule. Not removing it." }
                 $mi.RemoveChild($rule) | Out-Null
                 if (@($mi.ChildNodes | Where-Object { $_.LocalName -like 'File*Rule' }).Count -eq 0) { $mi.ParentNode.RemoveChild($mi) | Out-Null }
                 $file = Join-Path $env:windir 'Temp\immybot-managed-installer-offboard.xml'
                 try {
                     Set-Content -Path $file -Value $new.OuterXml -Encoding UTF8
+                    $at = (Get-Date).ToUniversalTime().ToString('o')
                     Set-AppLockerPolicy -XmlPolicy $file -ErrorAction Stop
                 } finally {
                     Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
                 }
+                $at
             }
             Write-Host "Removed the ImmyBot managed installer rule. Other AppLocker rules and tracking are left as they were."
-            $State = Get-ManagedInstallerState
+            # The agent must restart after Windows compiles the removal, or it starts under the old policy
+            Start-AppLockerPolicyCompile
+            $State = Wait-ManagedInstallerPolicyCompiled -Since $removedAt -AllowMissing
             if ($State.RulePresent) { throw "The ImmyBot rule is still in the effective AppLocker policy after removal." }
         }
 
